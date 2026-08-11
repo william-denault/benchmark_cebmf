@@ -12,8 +12,8 @@ library(softImpute)
 # Configuration
 #------------------------------------------------------------
 
-sim_path <- "./cEBMF_sim_and_fit"
-plot_path <- file.path(sim_path, "plots")
+sim_path <- "./cEBMF_sim_and_fit/tree"
+plot_path <- file.path(sim_path, "plots/tree")
 dir.create(plot_path, recursive = TRUE, showWarnings = FALSE)
 
 n_simulations <- 100L

@@ -1,0 +1,523 @@
+library(flashier)
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(gridExtra)
+library(data.table)
+library(ica)
+library(softImpute)
+
+source("./script/utils.R", echo = FALSE)
+#------------------------------------------------------------
+# Configuration
+#------------------------------------------------------------
+
+sim_path <- "./cEBMF_sim_and_fit/ind"
+plot_path <- file.path(sim_path, "plots/ind")
+dir.create(plot_path, recursive = TRUE, showWarnings = FALSE)
+
+n_simulations <- 10L
+simulation_ids <- 0:(n_simulations - 1L)
+
+max_oracle_rank <- 30L
+softimpute_lambda <- 1
+ica_maxit <- 1000L
+max_components_to_plot <- 10L
+
+
+#------------------------------------------------------------
+# Priors and storage
+#------------------------------------------------------------
+
+factor_priors <- list(
+  Laplace = ebnm_point_laplace
+)
+
+results <- list()
+all_fits <- setNames(
+  vector("list", n_simulations),
+  paste0("simulation_", simulation_ids)
+)
+simulation_panels <- setNames(
+  vector("list", n_simulations),
+  paste0("simulation_", simulation_ids)
+)
+oracle_rank_curves <- list()
+
+ptime <- proc.time()
+
+
+#------------------------------------------------------------
+# Fit all simulations
+#------------------------------------------------------------
+
+for (i in simulation_ids) {
+  message("Processing simulation ", i)
+
+  Z <- read_numeric_matrix(
+    file.path(sim_path, paste0("Z_matrix_", i, ".txt"))
+  )
+  X_true <- read_numeric_matrix(
+    file.path(sim_path, paste0("X_matrix_", i, ".txt"))
+  )
+  L_cebmf <- read_numeric_matrix(
+    file.path(sim_path, paste0("L_cebmf_", i, ".txt"))
+  )
+  fit_cebmf <- read_numeric_matrix(
+    file.path(sim_path, paste0("fit_cebmf_", i, ".txt"))
+  )
+
+  validate_pair(Z, X_true)
+  stopifnot(identical(dim(fit_cebmf), dim(X_true)))
+  stopifnot(nrow(L_cebmf) == nrow(Z))
+
+  set.seed(i)
+
+  simulation_fits <- list()
+  simulation_plots <- list()
+
+  # Raw noisy-matrix baseline: necessary to measure whether denoising helped.
+  raw_rmse <- matrix_rmse(Z, X_true)
+  results[[length(results) + 1L]] <- data.frame(
+    simulation = i,
+    method = "No denoising (Z)",
+    n_components = NA_integer_,
+    selected_rank = NA_integer_,
+    effective_rank = NA_integer_,
+    rmse = raw_rmse,
+    elbo = NA_real_,
+    lambda = NA_real_
+  )
+
+  for (method_name in names(factor_priors)) {
+    message("  Fitting FLASH: ", method_name)
+
+    fit <- fit_flash_model(
+      Z = Z,
+      factor_prior = factor_priors[[method_name]]
+    )
+    current_rmse <- reconstruction_rmse(fit, X_true)
+    current_rank <- ncol(fit$L_pm)
+
+    simulation_fits[[method_name]] <- fit
+    results[[length(results) + 1L]] <- data.frame(
+      simulation = i,
+      method = method_name,
+      n_components = current_rank,
+      selected_rank = current_rank,
+      effective_rank = current_rank,
+      rmse = current_rmse,
+      elbo = tail(fit$elbo, 1),
+      lambda = NA_real_
+    )
+
+    simulation_plots[[method_name]] <- make_component_heatmap(
+      scores = fit$L_pm,
+      simulation = i,
+      method_name = paste0("GB + ", method_name),
+      rmse = current_rmse,
+      rank_text = paste0("Fitted factors = ", current_rank),
+      max_components = max_components_to_plot
+    )
+  }
+
+  # Imported cEBMF result.
+  cebmf_rmse <- matrix_rmse(fit_cebmf, X_true)
+  cebmf_rank <- ncol(L_cebmf)
+  simulation_fits[["cEBMF= cGB + pt Normal"]] <- list(
+    L_pm = L_cebmf,
+    X_hat = fit_cebmf
+  )
+  results[[length(results) + 1L]] <- data.frame(
+    simulation = i,
+    method = "cEBMF= cGB + pt Normal",
+    n_components = cebmf_rank,
+    selected_rank = cebmf_rank,
+    effective_rank = cebmf_rank,
+    rmse = cebmf_rmse,
+    elbo = NA_real_,
+    lambda = NA_real_
+  )
+  simulation_plots[["cEBMF= cGB + pt Normal"]] <- make_component_heatmap(
+    scores = L_cebmf[,1:6],
+    simulation = i,
+    method_name = "cEBMF= cGB + pt Normal",
+    rmse = cebmf_rmse,
+    rank_text = paste0("Fitted factors = ", 4),
+    max_components = 6
+  )
+
+  message("  Fitting oracle PCA")
+  pca_fit <- fit_oracle_pca(
+    Z = Z,
+    X_true = X_true,
+    max_rank = max_oracle_rank
+  )
+  simulation_fits[["PCA (oracle)"]] <- pca_fit
+  results[[length(results) + 1L]] <- data.frame(
+    simulation = i,
+    method = "PCA (oracle)",
+    n_components = pca_fit$effective_rank,
+    selected_rank = pca_fit$selected_rank,
+    effective_rank = pca_fit$effective_rank,
+    rmse = pca_fit$rmse,
+    elbo = NA_real_,
+    lambda = NA_real_
+  )
+  simulation_plots[["PCA (oracle)"]] <- make_component_heatmap(
+    scores = pca_fit$L_pm,
+    simulation = i,
+    method_name = "oracle PCA",
+    rmse = pca_fit$rmse,
+    rank_text = paste0("Oracle rank = ", pca_fit$selected_rank),
+    max_components = max_components_to_plot
+  )
+  oracle_rank_curves[[length(oracle_rank_curves) + 1L]] <-
+    pca_fit$rmse_by_rank |>
+    mutate(
+      simulation = i,
+      method = "PCA (oracle)",
+      lambda = NA_real_,
+      .before = 1
+    )
+
+  message("  Fitting oracle ICA")
+  ica_fit <- fit_oracle_ica(
+    Z = Z,
+    X_true = X_true,
+    max_rank = max_oracle_rank,
+    seed = 1000L + i,
+    maxit = ica_maxit
+  )
+  simulation_fits[["ICA (oracle)"]] <- ica_fit
+  results[[length(results) + 1L]] <- data.frame(
+    simulation = i,
+    method = "ICA (oracle)",
+    n_components = ica_fit$effective_rank,
+    selected_rank = ica_fit$selected_rank,
+    effective_rank = ica_fit$effective_rank,
+    rmse = ica_fit$rmse,
+    elbo = NA_real_,
+    lambda = NA_real_
+  )
+  simulation_plots[["ICA (oracle)"]] <- make_component_heatmap(
+    scores = ica_fit$L_pm,
+    simulation = i,
+    method_name = "oracle ICA",
+    rmse = ica_fit$rmse,
+    rank_text = paste0("Oracle rank = ", ica_fit$selected_rank),
+    max_components = max_components_to_plot
+  )
+  oracle_rank_curves[[length(oracle_rank_curves) + 1L]] <-
+    ica_fit$rmse_by_rank |>
+    mutate(
+      simulation = i,
+      method = "ICA (oracle)",
+      lambda = NA_real_,
+      .before = 1
+    )
+
+  ica_line_plot <- make_ica_line_plot(
+    fit = ica_fit,
+    simulation = i,
+    max_components = max_components_to_plot
+  )
+  ggsave(
+    filename = file.path(
+      plot_path,
+      paste0("ica_components_simulation_", i, ".png")
+    ),
+    plot = ica_line_plot,
+    width = 11,
+    height = max(
+      4.5,
+      2.3 * ceiling(
+        min(ica_fit$effective_rank, max_components_to_plot) / 2
+      )
+    ),
+    dpi = 300
+  )
+
+  message(
+    "  Fitting oracle-rank SoftImpute (lambda = ",
+    softimpute_lambda,
+    ")"
+  )
+  soft_fit <- fit_oracle_softimpute(
+    Z = Z,
+    X_true = X_true,
+    max_rank = max_oracle_rank,
+    lambda = softimpute_lambda
+  )
+  simulation_fits[["SoftImpute (oracle)"]] <- soft_fit
+  results[[length(results) + 1L]] <- data.frame(
+    simulation = i,
+    method = "SoftImpute (oracle)",
+    n_components = soft_fit$effective_rank,
+    selected_rank = soft_fit$selected_rank,
+    effective_rank = soft_fit$effective_rank,
+    rmse = soft_fit$rmse,
+    elbo = NA_real_,
+    lambda = soft_fit$lambda
+  )
+  simulation_plots[["SoftImpute (oracle)"]] <- make_component_heatmap(
+    scores = soft_fit$L_pm,
+    simulation = i,
+    method_name = "oracle-rank SoftImpute",
+    rmse = soft_fit$rmse,
+    rank_text = paste0(
+      "Oracle rank.max = ", soft_fit$selected_rank,
+      "; effective rank = ", soft_fit$effective_rank,
+      "; lambda = ", soft_fit$lambda
+    ),
+    max_components = max_components_to_plot
+  )
+  oracle_rank_curves[[length(oracle_rank_curves) + 1L]] <-
+    soft_fit$rmse_by_rank |>
+    mutate(
+      simulation = i,
+      method = "SoftImpute (oracle)",
+      lambda = soft_fit$lambda,
+      .before = 1
+    )
+
+  all_fits[[paste0("simulation_", i)]] <- simulation_fits
+
+  # Five component panels: 3 columns x 2 rows is readable at this size.
+  panel_ncol <- 3L
+  panel_nrow <- ceiling(length(simulation_plots) / panel_ncol)
+  combined_panel <- gridExtra::arrangeGrob(
+    grobs = simulation_plots,
+    ncol = panel_ncol,
+    top = grid::textGrob(
+      paste0("Denoising factor estimates: simulation ", i),
+      gp = grid::gpar(
+        fontsize = 15,
+        fontface = "bold"
+      )
+    )
+  )
+
+  simulation_panels[[paste0("simulation_", i)]] <- combined_panel
+
+  grid::grid.newpage()
+  grid::grid.draw(combined_panel)
+
+  ggsave(
+    filename = file.path(
+      plot_path,
+      paste0("component_heatmaps_simulation_", i, ".png")
+    ),
+    plot = combined_panel,
+    width = 18,
+    height = 5 * panel_nrow,
+    dpi = 300
+  )
+}
+
+
+#------------------------------------------------------------
+# Numerical output
+#------------------------------------------------------------
+
+elapsed_time <- proc.time() - ptime
+print(elapsed_time)
+
+rmse_results <- dplyr::bind_rows(results)
+
+
+# Create example factor
+rmse_results$method[which( rmse_results$method=="Laplace")]="EBMF= GB+pt Laplace"
+
+raw_results <- rmse_results |>
+  filter(method == "No denoising (Z)") |>
+  select(simulation, raw_rmse = rmse)
+
+rmse_results <- rmse_results |>
+  left_join(raw_results, by = "simulation") |>
+  mutate(
+    rmse_gain = raw_rmse - rmse,
+    relative_rmse_gain = if_else(
+      raw_rmse > 0,
+      (raw_rmse - rmse) / raw_rmse,
+      NA_real_
+    )
+  )
+
+write.csv(
+  rmse_results,
+  file = file.path(plot_path, "rmse_results.csv"),
+  row.names = FALSE
+)
+print(rmse_results)
+
+
+
+
+rmse_summary <- rmse_results |>
+  group_by(method) |>
+  summarise(
+    mean_rmse = mean(rmse),
+    sd_rmse = sd(rmse),
+    mean_rmse_gain = mean(rmse_gain),
+    mean_n_components = if (all(is.na(n_components))) {
+      NA_real_
+    } else {
+      mean(n_components, na.rm = TRUE)
+    },
+    .groups = "drop"
+  ) |>
+  arrange(mean_rmse)
+print(rmse_summary)
+
+oracle_choices <- rmse_results |>
+  filter(grepl("oracle", method, ignore.case = TRUE)) |>
+  select(
+    simulation,
+    method,
+    selected_rank,
+    effective_rank,
+    lambda,
+    rmse
+  )
+print(oracle_choices)
+
+oracle_rank_results <- dplyr::bind_rows(oracle_rank_curves)
+write.csv(
+  oracle_rank_results,
+  file = file.path(plot_path, "oracle_rmse_by_rank.csv"),
+  row.names = FALSE
+)
+
+
+#------------------------------------------------------------
+# Readable RMSE comparison plot
+#------------------------------------------------------------
+
+method_order <- c(
+  "No denoising (Z)",
+  names(factor_priors),
+  "cEBMF= cGB + pt Normal",
+  "PCA (oracle)",
+  "ICA (oracle)",
+  "SoftImpute (oracle)"
+)
+
+method_order <- method_order[method_order %in% unique(rmse_results$method)]
+
+rmse_plot_data <- rmse_results |>
+  mutate(method = factor(method, levels = method_order))
+
+if (anyNA(rmse_plot_data$method)) {
+  stop(
+    "Some result methods are missing from method_order: ",
+    paste(
+      setdiff(unique(rmse_results$method), method_order),
+      collapse = ", "
+    )
+  )
+}
+
+
+rmse_comparison_plot <- ggplot(
+  rmse_results[ -which (rmse_results$method =="No denoising (Z)"),],
+  aes(
+    x = simulation,
+    y = rmse,
+    colour = method,
+    linetype = method,
+    shape = method,
+    group = method
+  )
+) +
+  geom_line(linewidth = 0.8, alpha = 0.9) +
+  geom_point(size = 2.5) +
+  scale_x_continuous(breaks = simulation_ids) +
+
+  theme_minimal(base_size = 11) +
+  labs(
+    title = "Denoising RMSE by simulation",
+    subtitle = paste0(
+      "RMSE no denoising = ",floor(mean (rmse_plot_data$rmse[   which (rmse_plot_data$method =="No denoising (Z)") ])*1e4)*1e-4
+    ),
+    x = "Simulation",
+    y = "Reconstruction RMSE",
+    colour = "Method",
+    linetype = "Method",
+    shape = "Method"
+  ) +
+  guides(
+    colour = guide_legend(nrow = 2, byrow = TRUE),
+    linetype = guide_legend(nrow = 2, byrow = TRUE),
+    shape = guide_legend(nrow = 2, byrow = TRUE)
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    panel.grid.minor = element_blank(),
+    plot.title.position = "plot"
+  )
+
+print(rmse_comparison_plot)
+ggsave(
+  filename = file.path(plot_path, "rmse_comparison.png"),
+  plot = rmse_comparison_plot,
+  width = 11,
+  height = 6.5,
+  dpi = 300
+)
+
+
+#------------------------------------------------------------
+# Oracle RMSE-versus-rank diagnostic plot
+#------------------------------------------------------------
+
+rank_method_order <- c(
+  "PCA (oracle)",
+  "ICA (oracle)",
+  "SoftImpute (oracle)"
+)
+
+oracle_rank_plot_data <- oracle_rank_results |>
+  mutate(method = factor(method, levels = rank_method_order))
+
+oracle_rank_plot <- ggplot(
+  oracle_rank_plot_data,
+  aes(
+    x = rank,
+    y = rmse,
+    colour = method,
+    group = method
+  )
+) +
+  geom_line(linewidth = 0.65, na.rm = TRUE) +
+  geom_point(size = 1.2, na.rm = TRUE) +
+  facet_wrap(~simulation, ncol = 5, scales = "free_y") +
+  scale_colour_manual(
+    values = method_colours[rank_method_order],
+    drop = FALSE
+  ) +
+  theme_minimal(base_size = 9) +
+  labs(
+    title = "Oracle reconstruction RMSE by candidate rank",
+    subtitle = paste0(
+      "SoftImpute uses fixed lambda = ", softimpute_lambda
+    ),
+    x = "Candidate rank",
+    y = "RMSE",
+    colour = "Method"
+  ) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+
+print(oracle_rank_plot)
+ggsave(
+  filename = file.path(plot_path, "oracle_rmse_by_rank.png"),
+  plot = oracle_rank_plot,
+  width = 14,
+  height = 7,
+  dpi = 300
+)
+

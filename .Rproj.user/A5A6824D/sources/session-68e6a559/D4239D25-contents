@@ -1,0 +1,12 @@
+Z <- read_numeric_matrix(
+  file.path(sim_path, paste0("Z_matrix_", i, ".txt"))
+)
+sim_path <- "./cEBMF_sim_and_fit/tree"
+temp=flash(
+  Z,
+  greedy_Kmax = 10,
+ 
+  backfit = TRUE,
+  verbose = 0
+)
+temp$F_pm
