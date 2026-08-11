@@ -1,0 +1,3 @@
+
+plot(fit_cebmf,X_true)
+points(temp$L_pm%*%t(temp$F_pm), X_true, col="green")

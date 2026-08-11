@@ -16,7 +16,7 @@ sim_path <- "./cEBMF_sim_and_fit/tree"
 plot_path <- file.path(sim_path, "plots/tree")
 dir.create(plot_path, recursive = TRUE, showWarnings = FALSE)
 
-n_simulations <- 10L
+n_simulations <- 30L
 simulation_ids <- 0:(n_simulations - 1L)
 
 max_oracle_rank <- 30L

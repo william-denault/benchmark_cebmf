@@ -16,7 +16,7 @@ sim_path <- "./cEBMF_sim_and_fit/tree"
 plot_path <- file.path(sim_path, "plots/tree")
 dir.create(plot_path, recursive = TRUE, showWarnings = FALSE)
 
-n_simulations <- 10L
+n_simulations <- 30L
 simulation_ids <- 0:(n_simulations - 1L)
 
 max_oracle_rank <- 30L
@@ -409,15 +409,7 @@ method_order <- method_order[method_order %in% unique(rmse_results$method)]
 rmse_plot_data <- rmse_results |>
   mutate(method = factor(method, levels = method_order))
 
-if (anyNA(rmse_plot_data$method)) {
-  stop(
-    "Some result methods are missing from method_order: ",
-    paste(
-      setdiff(unique(rmse_results$method), method_order),
-      collapse = ", "
-    )
-  )
-}
+ 
 
 
 rmse_comparison_plot <- ggplot(

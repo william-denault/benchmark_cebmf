@@ -19,7 +19,7 @@ dir.create(plot_path, recursive = TRUE, showWarnings = FALSE)
 n_simulations <- 10L
 simulation_ids <- 0:(n_simulations - 1L)
 
-max_oracle_rank <- 30L
+max_oracle_rank <- 10L
 softimpute_lambda <- 1
 ica_maxit <- 1000L
 max_components_to_plot <- 10L
@@ -408,15 +408,7 @@ method_order <- method_order[method_order %in% unique(rmse_results$method)]
 rmse_plot_data <- rmse_results |>
   mutate(method = factor(method, levels = method_order))
 
-if (anyNA(rmse_plot_data$method)) {
-  stop(
-    "Some result methods are missing from method_order: ",
-    paste(
-      setdiff(unique(rmse_results$method), method_order),
-      collapse = ", "
-    )
-  )
-}
+
 
 
 rmse_comparison_plot <- ggplot(
@@ -493,10 +485,7 @@ oracle_rank_plot <- ggplot(
   geom_line(linewidth = 0.65, na.rm = TRUE) +
   geom_point(size = 1.2, na.rm = TRUE) +
   facet_wrap(~simulation, ncol = 5, scales = "free_y") +
-  scale_colour_manual(
-    values = method_colours[rank_method_order],
-    drop = FALSE
-  ) +
+
   theme_minimal(base_size = 9) +
   labs(
     title = "Oracle reconstruction RMSE by candidate rank",
