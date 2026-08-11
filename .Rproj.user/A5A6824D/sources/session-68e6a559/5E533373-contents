@@ -428,7 +428,7 @@ rmse_comparison_plot <- ggplot(
 
   theme_minimal(base_size = 11) +
   labs(
-    title = "Denoising RMSE by simulation",
+    title = "Denoising RMSE by simulation, independant binary simulation",
     subtitle = paste0(
       "RMSE no denoising = ",floor(mean (rmse_plot_data$rmse[   which (rmse_plot_data$method =="No denoising (Z)") ])*1e4)*1e-4
     ),
